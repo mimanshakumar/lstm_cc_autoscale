@@ -1,0 +1,151 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import random
+
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+
+#Server constants 
+REQUESTS_PER_SERVER  = 150
+MIN_SERVERS          = 2
+MAX_SERVERS          = 20
+COLD_START_STEPS     = 6    # 30 seconds to boot a server
+SCALE_UP_THRESHOLD   = 0.75
+SCALE_DOWN_THRESHOLD = 0.30
+
+#Workload generator
+def generate_workload(scenario="spike", total_steps=720):
+    base = np.random.poisson(lam=100, size=total_steps).astype(float)
+
+    if scenario == "normal":
+        rhythm = 15 * np.sin(np.linspace(0, 2 * np.pi, total_steps))
+        return np.clip(base + rhythm, 20, 200)
+
+    elif scenario == "spike":
+        spike_centers = [150, 280, 450, 600]
+        for center in spike_centers:
+            duration   = random.randint(8, 12)          # 40-60 seconds
+            intensity  = random.uniform(700, 1000)       # 7-10x normal load
+            start = max(0, center - duration // 2)
+            end   = min(total_steps, start + duration)
+            base[start:end] += np.random.poisson(lam=intensity, size=end - start)
+        return np.clip(base, 20, 2000)
+
+    elif scenario == "ramp":
+        ramp = np.concatenate([
+            np.linspace(0, 350, total_steps // 2),
+            np.linspace(350, 0, total_steps - total_steps // 2)
+        ])
+        return np.clip(base + ramp, 20, 700)
+
+#Server pool
+class ServerPool:
+    def __init__(self):
+        self.active_servers    = MIN_SERVERS
+        self.pending_servers   = 0
+        self.pending_countdown = 0
+
+    def step(self, incoming_requests):
+        if self.pending_countdown > 0:
+            self.pending_countdown -= 1
+            if self.pending_countdown == 0 and self.pending_servers > 0:
+                self.active_servers = min(
+                    self.active_servers + self.pending_servers, MAX_SERVERS)
+                self.pending_servers = 0
+        capacity    = self.active_servers * REQUESTS_PER_SERVER
+        utilisation = incoming_requests / capacity
+        return utilisation, utilisation > 1.0
+
+    def scale_up(self, n=1):
+        if self.active_servers + self.pending_servers < MAX_SERVERS:
+            self.pending_servers   += n
+            self.pending_countdown  = COLD_START_STEPS
+
+    def scale_down(self, n=1):
+        self.active_servers = max(MIN_SERVERS, self.active_servers - n)
+
+#Reactive scaler
+def run_reactive_scaler(workload, label="Reactive"):
+    pool    = ServerPool()
+    results = []
+    for t, requests in enumerate(workload):
+        utilisation, sla_violated = pool.step(requests)
+        if utilisation > SCALE_UP_THRESHOLD:
+            pool.scale_up(1)
+        elif utilisation < SCALE_DOWN_THRESHOLD and pool.active_servers > MIN_SERVERS:
+            pool.scale_down(1)
+        results.append({
+            "step": t, "time_min": t * 5 / 60,
+            "requests": requests,
+            "active_servers": pool.active_servers,
+            "pending_servers": pool.pending_servers,
+            "utilisation": utilisation,
+            "sla_violated": sla_violated,
+            "strategy": label
+        })
+    return pd.DataFrame(results)
+
+#Metrics
+def compute_metrics(df):
+    total   = len(df)
+    sla_pct = (df["sla_violated"].sum() / total) * 100
+    cost    = (df["active_servers"] * 5 / 3600).sum()
+    return {
+        "SLA Violation %":  round(sla_pct, 2),
+        "Server-Hours":     round(cost, 3),
+        "Avg Util %":       round(df["utilisation"].mean() * 100, 1),
+        "Max Servers":      int(df["active_servers"].max()),
+    }
+
+#Generate and go!
+print("Generating workloads...")
+workload_normal = generate_workload("normal")
+workload_spike  = generate_workload("spike")
+workload_ramp   = generate_workload("ramp")
+
+print("Running reactive scaler...")
+reactive_normal = run_reactive_scaler(workload_normal)
+reactive_spike  = run_reactive_scaler(workload_spike)
+reactive_ramp   = run_reactive_scaler(workload_ramp)
+
+#save csv
+for df, name in [(reactive_normal,"normal"),
+                 (reactive_spike, "spike"),
+                 (reactive_ramp,  "ramp")]:
+    df["scenario"] = name
+all_reactive = pd.concat([reactive_normal, reactive_spike, reactive_ramp],
+                          ignore_index=True)
+all_reactive.to_csv("reactive_baseline_results.csv", index=False)
+
+#metrics
+m = {s: compute_metrics(df) for s, df in [
+    ("Normal", reactive_normal),
+    ("Spike",  reactive_spike),
+    ("Ramp",   reactive_ramp)]}
+print("\n📊 REACTIVE BASELINE")
+print(f"  Normal  →  SLA: {m['Normal']['SLA Violation %']:.1f}%  Cost: {m['Normal']['Server-Hours']:.3f} server-hrs")
+print(f"  Spike   →  SLA: {m['Spike']['SLA Violation %']:.1f}%  Cost: {m['Spike']['Server-Hours']:.3f} server-hrs")
+print(f"  Ramp    →  SLA: {m['Ramp']['SLA Violation %']:.1f}%  Cost: {m['Ramp']['Server-Hours']:.3f} server-hrs")
+
+# ── Plots
+fig, axes = plt.subplots(3, 1, figsize=(14, 9), sharex=True)
+fig.suptitle("Payment Gateway Workloads — Short Sharp Spikes", fontsize=13, fontweight='bold')
+t_ax = np.arange(720) * 5 / 60
+for ax, (data, title, color) in zip(axes, [
+    (workload_normal, "Normal Day",         "#2E75B6"),
+    (workload_spike,  "Flash Sale (Spike)", "#C00000"),
+    (workload_ramp,   "Salary Day (Ramp)",  "#375623"),
+]):
+    ax.fill_between(t_ax, data, alpha=0.2, color=color)
+    ax.plot(t_ax, data, color=color, linewidth=1.2)
+    ax.axhline(100, color='gray', linestyle='--', linewidth=0.8, alpha=0.6)
+    ax.set_title(title, fontsize=10, fontweight='bold')
+    ax.set_ylabel("Req/sec")
+    ax.grid(True, alpha=0.3)
+axes[-1].set_xlabel("Time (minutes)")
+plt.tight_layout()
+plt.savefig("workloads_v2.png", dpi=150, bbox_inches='tight')
+plt.show()
