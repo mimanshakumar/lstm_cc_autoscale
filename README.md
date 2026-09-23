@@ -1,6 +1,6 @@
 # LSTM-Based Predictive Auto-Scaling
 
-Undergraduate cloud computing research (with Dr. Abhishek Gaur) on LSTM-based predictive auto-scaling for cloud infrastructure, with a focus on domain-shift generalization. Central finding: a frozen, pretrained LSTM fine-tuned on synthetic bursts shows **negative transfer** — it underperforms simple reactive scaling — when evaluated on real financial transaction traces. IEEE paper in progress.
+Undergraduate cloud computing research on LSTM-based predictive auto-scaling for cloud infrastructure, with a focus on domain-shift generalization. Central finding: a frozen, pretrained LSTM fine-tuned on synthetic bursts shows **negative transfer** — it underperforms simple reactive scaling — when evaluated on real financial transaction traces. IEEE paper in progress.
 
 ## Pipeline
 
